@@ -1,8 +1,17 @@
 import socket
 import threading
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, messagebox, filedialog
 import time
+import base64
+import os
+import json
+from datetime import datetime
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 class WindowsClient:
     def __init__(self):
@@ -10,12 +19,19 @@ class WindowsClient:
         self.connected = False
         self.running = False
         self.local_ip = None
+        self.received_images_dir = "client_received_images"
+        self.selected_image_path = None
+        self.setup_directories()
         self.setup_gui()
+        
+    def setup_directories(self):
+        """Create directory for storing received images"""
+        os.makedirs(self.received_images_dir, exist_ok=True)
         
     def setup_gui(self):
         self.root = tk.Tk()
         self.root.title("VM-Windows Communication Client")
-        self.root.geometry("600x500")
+        self.root.geometry("700x600")
         
         conn_frame = tk.Frame(self.root)
         conn_frame.pack(pady=10, fill='x', padx=10)
@@ -47,15 +63,34 @@ class WindowsClient:
         )
         self.message_area.pack(fill='both', expand=True, pady=5)
 
-        # Input area for sending messages
+        # Image controls frame
+        image_frame = tk.Frame(self.root)
+        image_frame.pack(pady=5, fill='x', padx=10)
+        
+        tk.Label(image_frame, text="Image:", font=('Arial', 10, 'bold')).pack(side='left')
+        self.select_image_btn = tk.Button(image_frame, text="Select Image", command=self.select_image, state='disabled')
+        self.select_image_btn.pack(side='left', padx=5)
+        
+        self.selected_file_label = tk.Label(image_frame, text="No image selected", fg="gray")
+        self.selected_file_label.pack(side='left', padx=5)
+        
+        self.send_image_btn = tk.Button(image_frame, text="Send Image", command=self.send_image, state='disabled')
+        self.send_image_btn.pack(side='right')
+        
+        self.view_images_btn = tk.Button(image_frame, text="View Received", command=self.view_received_images, state='disabled')
+        self.view_images_btn.pack(side='right', padx=5)
+        
+        # Input area for sending text messages
         input_frame = tk.Frame(self.root)
         input_frame.pack(pady=5, fill='x', padx=10)
+        
+        tk.Label(input_frame, text="Message:", font=('Arial', 10, 'bold')).pack(side='left')
         self.input_entry = tk.Entry(input_frame)
-        self.input_entry.pack(side='left', fill='x', expand=True)
+        self.input_entry.pack(side='left', fill='x', expand=True, padx=5)
         self.input_entry.config(state='disabled')
         self.input_entry.bind('<Return>', lambda _: self.send_message())
-        self.send_btn = tk.Button(input_frame, text="Send", command=self.send_message, state='disabled')
-        self.send_btn.pack(side='left', padx=(8, 0))
+        self.send_btn = tk.Button(input_frame, text="Send Text", command=self.send_message, state='disabled')
+        self.send_btn.pack(side='left', padx=5)
         
         btn_frame = tk.Frame(self.root)
         btn_frame.pack(pady=10, fill='x', padx=10)
@@ -65,6 +100,11 @@ class WindowsClient:
         
         self.clear_btn = tk.Button(btn_frame, text="Clear Messages", command=self.clear_messages)
         self.clear_btn.pack(side='left', padx=10)
+        
+        if not PIL_AVAILABLE:
+            self.pil_warning_btn = tk.Button(btn_frame, text="⚠️ Install Pillow for Images", 
+                                           command=self.show_pillow_warning, fg="orange")
+            self.pil_warning_btn.pack(side='left', padx=10)
         
         tk.Button(btn_frame, text="Exit", command=self.on_closing).pack(side='right')
         
@@ -101,6 +141,10 @@ class WindowsClient:
             self.port_entry.config(state='disabled')
             self.input_entry.config(state='normal')
             self.send_btn.config(state='normal')
+            self.select_image_btn.config(state='normal')
+            self.view_images_btn.config(state='normal')
+            if self.selected_image_path:
+                self.send_image_btn.config(state='normal')
             
             self.add_message(f"Connected to VM at {vm_ip}:{port}", "system")
             
@@ -118,7 +162,7 @@ class WindowsClient:
         buffer = ""
         while self.running and self.connected:
             try:
-                data_bytes = self.client_socket.recv(1024)
+                data_bytes = self.client_socket.recv(8192)
                 if not data_bytes:
                     break
 
@@ -130,51 +174,39 @@ class WindowsClient:
 
                 buffer += data
 
-                # Extract complete MESSAGE frames regardless of preceding noise
-                while True:
-                    start_idx = buffer.find('MESSAGE:')
-                    if start_idx == -1:
-                        # No message start yet; to avoid unbounded growth due to noise like 'ping',
-                        # trim buffer if it gets too large.
-                        if len(buffer) > 8192:
-                            buffer = buffer[-4096:]
-                        break
-
-                    end_idx = buffer.find('\n', start_idx)
-                    if end_idx == -1:
-                        # Partial message; keep only from 'MESSAGE:' onwards
-                        buffer = buffer[start_idx:]
-                        break
-
-                    payload = buffer[start_idx + len('MESSAGE:'):end_idx].strip()
-                    if payload:
-                        # Prefer normalized separator " | ", then fallback to ": "
-                        sender = "VM"
-                        text = payload
-                        has_sender = False
-                        if ' | ' in payload:
-                            sender, text = payload.split(' | ', 1)
-                            has_sender = True
-                        elif ': ' in payload:
-                            sender, text = payload.split(': ', 1)
-                            has_sender = True
-
-                        if has_sender:
-                            # Identify if this message is ours
-                            if self.local_ip and sender == self.local_ip:
-                                self.root.after(0, lambda msg=text: self.add_message(msg, "you"))
-                                print(f"Received self message: {text}")
-                            else:
-                                display_sender = sender if sender else "Peer"
-                                self.root.after(0, lambda snd=display_sender, msg=text: self.add_message(f"{snd}: {msg}", "peer"))
-                                print(f"Received message from {sender}: {text}")
-                        else:
-                            # Treat entire payload as plain VM text
-                            self.root.after(0, lambda msg=payload: self.add_message(msg, "vm"))
-                            print(f"Received message: {payload}")
-
-                    # Drop everything up to and including the newline we just processed
-                    buffer = buffer[end_idx + 1:]
+                # Process complete frames from buffer
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    if line.startswith('MESSAGE:'):
+                        payload = line[8:].strip()  # Remove 'MESSAGE:' prefix
+                        self.process_text_message(payload)
+                        
+                    elif line.startswith('SERVER_IMAGE:'):
+                        # Handle server image
+                        data = line[13:]  # Remove 'SERVER_IMAGE:' prefix
+                        self.root.after(0, lambda d=data: self.handle_received_image(d, "server"))
+                        
+                    elif line.startswith('IMAGE_LIST:'):
+                        # Handle server images list (for future use)
+                        data = line[11:]  # Remove 'IMAGE_LIST:' prefix
+                        try:
+                            image_list = json.loads(data)
+                            self.root.after(0, lambda lst=image_list: self.add_message(f"Server has {len(lst)} images available", "system"))
+                        except:
+                            pass
+                            
+                    elif line.startswith('IMAGE_ERROR:'):
+                        # Handle image error
+                        error = line[12:]  # Remove 'IMAGE_ERROR:' prefix
+                        self.root.after(0, lambda err=error: self.add_message(f"Image Error: {err}", "error"))
+                
+                # Trim buffer if too large
+                if len(buffer) > 16384:
+                    buffer = buffer[-8192:]
 
             except socket.timeout:
                 continue
@@ -188,6 +220,68 @@ class WindowsClient:
         if self.running:
             self.root.after(0, lambda: self.add_message("Connection lost to VM server", "error"))
             self.root.after(0, self.cleanup_connection)
+    
+    def process_text_message(self, payload):
+        """Process text message from server"""
+        if payload:
+            # Check for image notification first
+            if payload.startswith('IMAGE_RECEIVED:'):
+                data = payload[15:]  # Remove 'IMAGE_RECEIVED:' prefix
+                if '|' in data:
+                    sender_ip, filename = data.split('|', 1)
+                    self.root.after(0, lambda: self.add_message(f"📷 Image received from {sender_ip}: {filename}", "system"))
+                return
+            
+            # Process regular text messages
+            sender = "VM"
+            text = payload
+            has_sender = False
+            
+            if ' | ' in payload:
+                sender, text = payload.split(' | ', 1)
+                has_sender = True
+            elif ': ' in payload:
+                sender, text = payload.split(': ', 1)
+                has_sender = True
+
+            if has_sender:
+                # Identify if this message is ours
+                if self.local_ip and sender == self.local_ip:
+                    self.root.after(0, lambda msg=text: self.add_message(msg, "you"))
+                else:
+                    display_sender = sender if sender else "Peer"
+                    self.root.after(0, lambda snd=display_sender, msg=text: self.add_message(f"{snd}: {msg}", "peer"))
+            else:
+                # Treat entire payload as plain VM text
+                self.root.after(0, lambda msg=payload: self.add_message(msg, "vm"))
+    
+    def handle_received_image(self, image_data, source):
+        """Handle received image data"""
+        try:
+            # Parse image data (format: filename|base64_data)
+            parts = image_data.split('|', 1)
+            if len(parts) != 2:
+                self.add_message("Invalid image data received", "error")
+                return
+                
+            filename, base64_data = parts
+            
+            # Decode base64 image data
+            image_bytes = base64.b64decode(base64_data)
+            
+            # Generate unique filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            saved_filename = f"{timestamp}_{source}_{filename}"
+            filepath = os.path.join(self.received_images_dir, saved_filename)
+            
+            # Save image to file
+            with open(filepath, 'wb') as f:
+                f.write(image_bytes)
+            
+            self.add_message(f"📷 Image saved: {saved_filename}", "system")
+            
+        except Exception as e:
+            self.add_message(f"Error saving image: {e}", "error")
     
     def add_message(self, message, msg_type="vm"):
         timestamp = time.strftime("%H:%M:%S")
@@ -222,6 +316,84 @@ class WindowsClient:
         except Exception as e:
             self.add_message(f"Send failed: {e}", "error")
     
+    def select_image(self):
+        """Select an image file to send"""
+        if not PIL_AVAILABLE:
+            self.show_pillow_warning()
+            return
+            
+        filetypes = [
+            ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp"),
+            ("PNG files", "*.png"),
+            ("JPEG files", "*.jpg *.jpeg"),
+            ("All files", "*.*")
+        ]
+        
+        filename = filedialog.askopenfilename(
+            title="Select Image to Send",
+            filetypes=filetypes
+        )
+        
+        if filename:
+            self.selected_image_path = filename
+            basename = os.path.basename(filename)
+            self.selected_file_label.config(text=basename, fg="black")
+            if self.connected:
+                self.send_image_btn.config(state='normal')
+            self.add_message(f"📷 Selected image: {basename}", "system")
+    
+    def send_image(self):
+        """Send selected image to server"""
+        if not (self.connected and self.selected_image_path):
+            return
+            
+        if not PIL_AVAILABLE:
+            self.show_pillow_warning()
+            return
+            
+        try:
+            # Read image file
+            with open(self.selected_image_path, 'rb') as f:
+                image_data = f.read()
+            
+            # Encode image as base64
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+            filename = os.path.basename(self.selected_image_path)
+            
+            # Send image to server
+            message = f"IMAGE:{filename}|{base64_data}\n"
+            self.client_socket.send(message.encode('utf-8'))
+            
+            self.add_message(f"📷 Image sent: {filename}", "you")
+            
+            # Clear selection
+            self.selected_image_path = None
+            self.selected_file_label.config(text="No image selected", fg="gray")
+            self.send_image_btn.config(state='disabled')
+            
+        except Exception as e:
+            messagebox.showerror("Send Error", f"Failed to send image: {e}")
+            self.add_message(f"Image send failed: {e}", "error")
+    
+    def view_received_images(self):
+        """Open the received images folder"""
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(self.received_images_dir)
+            else:  # Linux/Mac
+                os.system(f'xdg-open "{self.received_images_dir}"')
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder: {e}")
+    
+    def show_pillow_warning(self):
+        """Show warning about missing Pillow library"""
+        messagebox.showwarning(
+            "Pillow Required", 
+            "Image functionality requires the Pillow library.\n\n"
+            "Install it with: pip install Pillow\n\n"
+            "Then restart the application."
+        )
+    
     def disconnect_from_server(self):
         self.running = False
         self.cleanup_connection()
@@ -249,6 +421,9 @@ class WindowsClient:
         self.port_entry.config(state='normal')
         self.input_entry.config(state='disabled')
         self.send_btn.config(state='disabled')
+        self.select_image_btn.config(state='disabled')
+        self.send_image_btn.config(state='disabled')
+        self.view_images_btn.config(state='disabled')
     
     def clear_messages(self):
         self.message_area.delete(1.0, tk.END)

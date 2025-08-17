@@ -6,8 +6,8 @@ import os
 import json
 from datetime import datetime
 
-class VMServer:
-    def __init__(self, host='0.0.0.0', port=12345):
+class ImageServer:
+    def __init__(self, host='0.0.0.0', port=12346):
         self.host = host
         self.port = port
         self.clients = []
@@ -31,19 +31,25 @@ class VMServer:
             self.server_socket.listen(5)
             self.running = True
             
-            print(f"Server started on {self.host}:{self.port}")
+            print(f"Image Server started on {self.host}:{self.port}")
             print("Waiting for connections...")
             
             while self.running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
-                    print(f"Connection established with {client_address}")
+                    print(f"Image client connected: {client_address}")
                     with self.clients_lock:
-                        self.clients.append(client_socket)
+                        self.clients.append({
+                            'socket': client_socket,
+                            'address': client_address
+                        })
                     
-                    # One thread for pinging/keepalive and one for reading client messages
-                    threading.Thread(target=self.handle_client_writer, args=(client_socket, client_address), daemon=True).start()
-                    threading.Thread(target=self.handle_client_reader, args=(client_socket, client_address), daemon=True).start()
+                    # Handle client in separate thread
+                    threading.Thread(
+                        target=self.handle_client, 
+                        args=(client_socket, client_address), 
+                        daemon=True
+                    ).start()
                     
                 except socket.error as e:
                     if self.running:
@@ -54,90 +60,56 @@ class VMServer:
         finally:
             self.cleanup()
     
-    def handle_client_writer(self, client_socket, client_address):
-        try:
-            while self.running:
-                try:
-                    client_socket.sendall(b"ping\n")
-                    time.sleep(1)
-                except:
-                    break
-        except Exception as e:
-            print(f"Error handling client (writer) {client_address}: {e}")
-        finally:
-            with self.clients_lock:
-                if client_socket in self.clients:
-                    self.clients.remove(client_socket)
-            try:
-                client_socket.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            client_socket.close()
-            print(f"Client {client_address} disconnected (writer)")
-
-    def handle_client_reader(self, client_socket, client_address):
-        buffer = ""
-        client_socket.settimeout(1.0)
+    def handle_client(self, client_socket, client_address):
+        buffer = b""
         try:
             while self.running:
                 try:
                     data = client_socket.recv(4096)
                     if not data:
                         break
-                    try:
-                        text = data.decode('utf-8')
-                    except UnicodeDecodeError:
-                        text = data.decode('utf-8', errors='ignore')
-                    buffer += text
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
-                        if line.startswith('CLIENT:'):
-                            msg = line[len('CLIENT:'):].strip()
-                            if msg:
-                                print(f"From {client_address}: {msg}")
-                                self.broadcast_message(f"{client_address[0]} | {msg}")
-                        elif line.startswith('IMAGE:'):
-                            # Handle image data
-                            image_data = line[6:]  # Remove 'IMAGE:' prefix
-                            self.handle_received_image(image_data, client_address)
-                        elif line.startswith('REQUEST_LIST'):
-                            # Send list of available server images
-                            self.send_image_list(client_socket)
-                        elif line.startswith('REQUEST_IMAGE:'):
-                            # Send specific image to client
-                            filename = line[14:]  # Remove 'REQUEST_IMAGE:' prefix
-                            self.send_image_to_client(filename, client_socket)
-                except socket.timeout:
-                    continue
-                except Exception:
+                    
+                    buffer += data
+                    
+                    # Process complete messages
+                    while b'\n' in buffer:
+                        line, buffer = buffer.split(b'\n', 1)
+                        if line:
+                            self.process_message(line, client_socket, client_address)
+                            
+                except socket.error:
                     break
+                    
+        except Exception as e:
+            print(f"Error handling client {client_address}: {e}")
         finally:
-            # Reader ends; writer cleanup will handle removal/close
-            pass
-    
-    def broadcast_message(self, message):
-        with self.clients_lock:
-            clients_snapshot = list(self.clients)
-        if not clients_snapshot:
-            print("No clients connected to broadcast to")
-            return
-            
-        disconnected_clients = []
-        for client in clients_snapshot:
+            self.remove_client(client_socket)
             try:
-                full_message = f"MESSAGE:{message}\n"
-                client.sendall(full_message.encode('utf-8'))
-                print(f"Sent to client: {message}")
-            except Exception as e:
-                print(f"Failed to send to client: {e}")
-                disconnected_clients.append(client)
-        
-        if disconnected_clients:
-            with self.clients_lock:
-                for client in disconnected_clients:
-                    if client in self.clients:
-                        self.clients.remove(client)
+                client_socket.close()
+            except:
+                pass
+            print(f"Client {client_address} disconnected")
+    
+    def process_message(self, message_bytes, sender_socket, sender_address):
+        try:
+            message_str = message_bytes.decode('utf-8')
+            
+            if message_str.startswith('IMAGE:'):
+                # Handle image data
+                image_data = message_str[6:]  # Remove 'IMAGE:' prefix
+                self.handle_received_image(image_data, sender_address)
+                
+            elif message_str.startswith('REQUEST_LIST'):
+                # Send list of available server images
+                self.send_image_list(sender_socket)
+                
+            elif message_str.startswith('REQUEST_IMAGE:'):
+                # Send specific image to client
+                filename = message_str[14:]  # Remove 'REQUEST_IMAGE:' prefix
+                self.send_image_to_client(filename, sender_socket)
+                
+        except Exception as e:
+            print(f"Error processing message: {e}")
     
     def handle_received_image(self, image_data_str, sender_address):
         try:
@@ -164,16 +136,25 @@ class VMServer:
             
             print(f"Image received and saved: {filename}")
             
-            # Broadcast image notification to other clients
-            self.broadcast_image_notification(original_filename, sender_address)
+            # Broadcast to other clients
+            self.broadcast_image_notification(filename, sender_address)
             
         except Exception as e:
             print(f"Error handling received image: {e}")
     
     def broadcast_image_notification(self, filename, sender_address):
         """Notify all clients about new image"""
-        notification = f"IMAGE_RECEIVED:{sender_address[0]}|{filename}"
-        self.broadcast_message(notification)
+        notification = f"IMAGE_RECEIVED:{sender_address[0]}|{filename}\n"
+        
+        with self.clients_lock:
+            clients_copy = list(self.clients)
+        
+        for client_info in clients_copy:
+            if client_info['address'] != sender_address:  # Don't send back to sender
+                try:
+                    client_info['socket'].send(notification.encode('utf-8'))
+                except:
+                    self.remove_client(client_info['socket'])
     
     def send_image_list(self, client_socket):
         """Send list of available server images"""
@@ -225,13 +206,28 @@ class VMServer:
                 image_data = f.read()
             
             base64_data = base64.b64encode(image_data).decode('utf-8')
-            message = f"SERVER_IMAGE:{filename}|{base64_data}"
-            self.broadcast_message(message)
+            message = f"SERVER_IMAGE:{filename}|{base64_data}\n"
             
-            print(f"Server image '{filename}' sent to all clients")
+            with self.clients_lock:
+                clients_copy = list(self.clients)
+            
+            sent_count = 0
+            for client_info in clients_copy:
+                try:
+                    client_info['socket'].send(message.encode('utf-8'))
+                    sent_count += 1
+                except:
+                    self.remove_client(client_info['socket'])
+            
+            print(f"Server image '{filename}' sent to {sent_count} clients")
             
         except Exception as e:
             print(f"Error sending server image: {e}")
+    
+    def remove_client(self, client_socket):
+        """Remove client from active clients list"""
+        with self.clients_lock:
+            self.clients = [c for c in self.clients if c['socket'] != client_socket]
     
     def list_server_images(self):
         """List available server images"""
@@ -251,8 +247,7 @@ class VMServer:
             return []
     
     def input_handler(self):
-        print("\nVM Server Commands:")
-        print("- Type messages to send to clients")
+        print("\nImage Server Commands:")
         print("- 'list' - Show available server images")
         print("- 'send <filename>' - Send image to all clients")
         print("- 'clients' - Show connected clients")
@@ -260,7 +255,7 @@ class VMServer:
         
         while self.running:
             try:
-                user_input = input("VM> ").strip()
+                user_input = input("ImageServer> ").strip()
                 
                 if user_input.lower() == 'quit':
                     self.running = False
@@ -274,11 +269,7 @@ class VMServer:
                         if self.clients:
                             print(f"\nConnected clients ({len(self.clients)}):")
                             for i, client in enumerate(self.clients, 1):
-                                try:
-                                    addr = client.getpeername()
-                                    print(f"{i}. {addr}")
-                                except:
-                                    print(f"{i}. Unknown address")
+                                print(f"{i}. {client['address']}")
                         else:
                             print("No clients connected")
                             
@@ -290,44 +281,38 @@ class VMServer:
                         print("Please specify a filename")
                         
                 elif user_input:
-                    self.broadcast_message(user_input)
+                    print("Unknown command. Type 'quit' to exit.")
                     
             except KeyboardInterrupt:
                 self.running = False
                 break
     
     def cleanup(self):
-        print("\nShutting down server...")
+        print("\nShutting down image server...")
         self.running = False
         
         with self.clients_lock:
             clients_copy = list(self.clients)
             self.clients.clear()
-        for client in clients_copy:
+        
+        for client_info in clients_copy:
             try:
-                try:
-                    client.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                client.close()
+                client_info['socket'].close()
             except:
                 pass
         
         if self.server_socket:
             try:
-                try:
-                    self.server_socket.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
                 self.server_socket.close()
             except:
                 pass
         
-        print("Server shut down complete")
+        print("Image server shut down complete")
 
 def main():
-    server = VMServer()
+    server = ImageServer()
     
+    # Start server in separate thread
     server_thread = threading.Thread(target=server.start_server)
     server_thread.daemon = True
     server_thread.start()
