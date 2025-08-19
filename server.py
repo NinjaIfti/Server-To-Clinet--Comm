@@ -76,22 +76,28 @@ class VMServer:
             print(f"Client {client_address} disconnected (writer)")
 
     def handle_client_reader(self, client_socket, client_address):
-        buffer = ""
+        buffer = b""  # Use bytes buffer for better handling
         client_socket.settimeout(1.0)
         try:
             while self.running:
                 try:
-                    data = client_socket.recv(4096)
+                    data = client_socket.recv(65536)  # Increased buffer size for images
                     if not data:
                         break
-                    try:
-                        text = data.decode('utf-8')
-                    except UnicodeDecodeError:
-                        text = data.decode('utf-8', errors='ignore')
-                    buffer += text
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
+                    
+                    buffer += data
+                    
+                    # Process complete messages (ending with \n)
+                    while b'\n' in buffer:
+                        line_bytes, buffer = buffer.split(b'\n', 1)
+                        try:
+                            line = line_bytes.decode('utf-8').strip()
+                        except UnicodeDecodeError:
+                            line = line_bytes.decode('utf-8', errors='ignore').strip()
+                        
+                        if not line:
+                            continue
+                            
                         if line.startswith('CLIENT:'):
                             msg = line[len('CLIENT:'):].strip()
                             if msg:
@@ -100,6 +106,7 @@ class VMServer:
                         elif line.startswith('IMAGE:'):
                             # Handle image data
                             image_data = line[6:]  # Remove 'IMAGE:' prefix
+                            print(f"Received image from {client_address} (message size: {len(line)} bytes)")
                             self.handle_received_image(image_data, client_address)
                         elif line.startswith('REQUEST_LIST'):
                             # Send list of available server images
@@ -110,7 +117,8 @@ class VMServer:
                             self.send_image_to_client(filename, client_socket)
                 except socket.timeout:
                     continue
-                except Exception:
+                except Exception as e:
+                    print(f"Error in client reader: {e}")
                     break
         finally:
             # Reader ends; writer cleanup will handle removal/close
@@ -128,7 +136,14 @@ class VMServer:
             try:
                 full_message = f"MESSAGE:{message}\n"
                 client.sendall(full_message.encode('utf-8'))
-                print(f"Sent to client: {message}")
+                # Only print message if it's not image data (to avoid huge base64 strings)
+                if not message.startswith('SERVER_IMAGE:'):
+                    print(f"Sent to client: {message}")
+                else:
+                    # Extract just filename for image messages
+                    if '|' in message:
+                        filename = message.split('|')[0].replace('SERVER_IMAGE:', '')
+                        print(f"Sent image to client: {filename}")
             except Exception as e:
                 print(f"Failed to send to client: {e}")
                 disconnected_clients.append(client)
@@ -144,10 +159,12 @@ class VMServer:
             # Parse image data (format: filename|base64_data)
             parts = image_data_str.split('|', 1)
             if len(parts) != 2:
-                print("Invalid image data format")
+                print(f"Invalid image data format. Parts: {len(parts)}")
+                print(f"Data preview: {image_data_str[:100]}...")
                 return
                 
             original_filename, base64_data = parts
+            print(f"Processing image: {original_filename} (size: {len(base64_data)} chars)")
             
             # Decode base64 image data
             image_bytes = base64.b64decode(base64_data)
@@ -221,17 +238,50 @@ class VMServer:
             return
         
         try:
+            print(f"Reading image file: {filepath}")
             with open(filepath, 'rb') as f:
                 image_data = f.read()
             
-            base64_data = base64.b64encode(image_data).decode('utf-8')
-            message = f"SERVER_IMAGE:{filename}|{base64_data}"
-            self.broadcast_message(message)
+            print(f"Image file size: {len(image_data)} bytes")
             
-            print(f"Server image '{filename}' sent to all clients")
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+            print(f"Base64 encoded size: {len(base64_data)} characters")
+            
+            # Create the message - format: SERVER_IMAGE:filename|base64_data
+            message = f"SERVER_IMAGE:{filename}|{base64_data}\n"
+            
+            # Send image directly to clients
+            with self.clients_lock:
+                clients_snapshot = list(self.clients)
+            
+            if not clients_snapshot:
+                print("No clients connected to send image to")
+                return
+                
+            disconnected_clients = []
+            sent_count = 0
+            for client in clients_snapshot:
+                try:
+                    print(f"Sending image to client: {len(message)} bytes total")
+                    client.sendall(message.encode('utf-8'))
+                    sent_count += 1
+                    print(f"Successfully sent to client {sent_count}")
+                except Exception as e:
+                    print(f"Failed to send image to client: {e}")
+                    disconnected_clients.append(client)
+            
+            if disconnected_clients:
+                with self.clients_lock:
+                    for client in disconnected_clients:
+                        if client in self.clients:
+                            self.clients.remove(client)
+            
+            print(f"Server image '{filename}' sent to {sent_count} clients")
             
         except Exception as e:
             print(f"Error sending server image: {e}")
+            import traceback
+            traceback.print_exc()
     
     def list_server_images(self):
         """List available server images"""

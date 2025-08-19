@@ -8,10 +8,17 @@ import os
 import json
 from datetime import datetime
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw, ImageFont
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+try:
+    import torch
+    import numpy as np
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
 
 class WindowsClient:
     def __init__(self):
@@ -20,13 +27,134 @@ class WindowsClient:
         self.running = False
         self.local_ip = None
         self.received_images_dir = "client_received_images"
+        self.processed_images_dir = "processed_images"
         self.selected_image_path = None
+        self.yolo_model = None
         self.setup_directories()
+        self.setup_yolo()
         self.setup_gui()
         
     def setup_directories(self):
-        """Create directory for storing received images"""
+        """Create directories for storing images"""
         os.makedirs(self.received_images_dir, exist_ok=True)
+        os.makedirs(self.processed_images_dir, exist_ok=True)
+    
+    def setup_yolo(self):
+        """Initialize YOLOv5 model"""
+        if not YOLO_AVAILABLE:
+            print("YOLO not available - install torch and numpy")
+            return
+            
+        try:
+            # Try to load YOLOv5 model
+            model_path = "yolov5s.pt"
+            
+            # Check if YOLO model file exists
+            if os.path.exists(model_path):
+                # Load YOLOv5 model
+                self.yolo_model = torch.hub.load('ultralytics/yolov5', 'custom', path=model_path)
+                self.yolo_model.eval()  # Set to evaluation mode
+                print("YOLOv5 model loaded successfully!")
+            else:
+                print("YOLOv5 model file not found. Download yolov5s.pt")
+                print("Auto-detection will be disabled.")
+                self.yolo_model = None
+                
+        except Exception as e:
+            print(f"Failed to load YOLOv5 model: {e}")
+            self.yolo_model = None
+    
+    def detect_objects(self, image_path):
+        """Run YOLOv5 object detection on image"""
+        if not self.yolo_model:
+            return None, "YOLOv5 model not available"
+            
+        try:
+            print(f"🔍 YOLOv5: Starting object detection on {os.path.basename(image_path)}")
+            
+            # Run YOLOv5 inference
+            results = self.yolo_model(image_path)
+            
+            # Debug: Show all detections found (even low confidence ones)
+            all_detections = results.xyxy[0].cpu().numpy()
+            print(f"🔍 YOLOv5: Found {len(all_detections)} total detections")
+            
+            # Parse results
+            detections = []
+            for *box, conf, cls in all_detections:
+                print(f"   Detection: {self.yolo_model.names[int(cls)]} confidence={conf:.3f}")
+                if conf > 0.1:  # Lowered confidence threshold
+                    x1, y1, x2, y2 = map(int, box)
+                    label = self.yolo_model.names[int(cls)]
+                    detections.append({
+                        'label': label,
+                        'confidence': float(conf),
+                        'box': [x1, y1, x2 - x1, y2 - y1]  # Convert to x, y, w, h format
+                    })
+            
+            print(f"🎯 YOLOv5: Detected {len(detections)} objects")
+            for det in detections:
+                print(f"   - {det['label']}: {det['confidence']:.2f}")
+            
+            # Draw detections on image
+            processed_image_path = self.draw_detections_pil(image_path, detections)
+            
+            return processed_image_path, f"Detected {len(detections)} objects"
+            
+        except Exception as e:
+            print(f"❌ YOLOv5: Detection failed: {e}")
+            return None, f"Detection failed: {e}"
+    
+    def draw_detections_pil(self, original_path, detections):
+        """Draw bounding boxes and labels on image using PIL"""
+        try:
+            # Open image with PIL
+            image = Image.open(original_path)
+            draw = ImageDraw.Draw(image)
+            
+            # Generate colors for different classes
+            colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'brown']
+            
+            for i, detection in enumerate(detections):
+                x, y, w, h = detection['box']
+                label = detection['label']
+                confidence = detection['confidence']
+                
+                # Get color for this detection
+                color = colors[i % len(colors)]
+                
+                # Draw bounding box
+                draw.rectangle([x, y, x + w, y + h], outline=color, width=3)
+                
+                # Draw label with confidence
+                label_text = f"{label}: {confidence:.2f}"
+                
+                try:
+                    # Try to use a default font
+                    font = ImageFont.load_default()
+                except:
+                    font = None
+                
+                # Draw label background
+                bbox = draw.textbbox((x, y - 20), label_text, font=font)
+                draw.rectangle(bbox, fill=color)
+                
+                # Draw label text
+                draw.text((x, y - 20), label_text, fill='white', font=font)
+            
+            # Save processed image
+            base_name = os.path.splitext(os.path.basename(original_path))[0]
+            processed_name = f"{base_name}_detected.jpg"
+            processed_path = os.path.join(self.processed_images_dir, processed_name)
+            
+            image.save(processed_path)
+            print(f"💾 YOLOv5: Processed image saved: {processed_name}")
+            
+            return processed_path
+            
+        except Exception as e:
+            print(f"❌ YOLOv5: Failed to draw detections: {e}")
+            return None
         
     def setup_gui(self):
         self.root = tk.Tk()
@@ -80,6 +208,9 @@ class WindowsClient:
         self.view_images_btn = tk.Button(image_frame, text="View Received", command=self.view_received_images, state='disabled')
         self.view_images_btn.pack(side='right', padx=5)
         
+        self.view_processed_btn = tk.Button(image_frame, text="View Detected", command=self.view_processed_images, state='disabled')
+        self.view_processed_btn.pack(side='right', padx=5)
+        
         # Input area for sending text messages
         input_frame = tk.Frame(self.root)
         input_frame.pack(pady=5, fill='x', padx=10)
@@ -105,6 +236,11 @@ class WindowsClient:
             self.pil_warning_btn = tk.Button(btn_frame, text="⚠️ Install Pillow for Images", 
                                            command=self.show_pillow_warning, fg="orange")
             self.pil_warning_btn.pack(side='left', padx=10)
+            
+        if not YOLO_AVAILABLE:
+            self.yolo_warning_btn = tk.Button(btn_frame, text="🔍 Install OpenCV for YOLO", 
+                                            command=self.show_yolo_warning, fg="blue")
+            self.yolo_warning_btn.pack(side='left', padx=10)
         
         tk.Button(btn_frame, text="Exit", command=self.on_closing).pack(side='right')
         
@@ -143,6 +279,7 @@ class WindowsClient:
             self.send_btn.config(state='normal')
             self.select_image_btn.config(state='normal')
             self.view_images_btn.config(state='normal')
+            self.view_processed_btn.config(state='normal')
             if self.selected_image_path:
                 self.send_image_btn.config(state='normal')
             
@@ -157,29 +294,33 @@ class WindowsClient:
             self.cleanup_connection()
     
     def receive_messages(self):
-        # Accumulate text data and extract MESSAGE:...\n frames robustly, even if other
-        # noise (e.g., pings without newlines) is interleaved or concatenated.
-        buffer = ""
+        # Use bytes buffer for better handling of large messages
+        buffer = b""
         while self.running and self.connected:
             try:
-                data_bytes = self.client_socket.recv(8192)
+                data_bytes = self.client_socket.recv(65536)
                 if not data_bytes:
                     break
 
-                try:
-                    data = data_bytes.decode('utf-8')
-                except UnicodeDecodeError:
-                    # Fallback: ignore undecodable bytes (unlikely for ASCII messages)
-                    data = data_bytes.decode('utf-8', errors='ignore')
+                buffer += data_bytes
+                # Only show progress for large transfers
+                if len(data_bytes) > 10000 or len(buffer) > 100000:
+                    print(f"Received {len(data_bytes)} bytes, buffer size now: {len(buffer)}")
 
-                buffer += data
-
-                # Process complete frames from buffer
-                while '\n' in buffer:
-                    line, buffer = buffer.split('\n', 1)
-                    line = line.strip()
-                    if not line:
+                # Process complete frames from buffer (ending with \n)
+                while b'\n' in buffer:
+                    line_bytes, buffer = buffer.split(b'\n', 1)
+                    try:
+                        line = line_bytes.decode('utf-8').strip()
+                    except UnicodeDecodeError:
+                        line = line_bytes.decode('utf-8', errors='ignore').strip()
+                    
+                    if not line or line == 'ping':  # Skip empty lines and pings
                         continue
+                        
+                    # Only show debug for image messages
+                    if line.startswith('SERVER_IMAGE:'):
+                        print(f"Processing SERVER_IMAGE message: {len(line)} bytes")
                         
                     if line.startswith('MESSAGE:'):
                         payload = line[8:].strip()  # Remove 'MESSAGE:' prefix
@@ -187,8 +328,12 @@ class WindowsClient:
                         
                     elif line.startswith('SERVER_IMAGE:'):
                         # Handle server image
-                        data = line[13:]  # Remove 'SERVER_IMAGE:' prefix
-                        self.root.after(0, lambda d=data: self.handle_received_image(d, "server"))
+                        image_data = line[13:]  # Remove 'SERVER_IMAGE:' prefix
+                        print(f"Client received SERVER_IMAGE (size: {len(line)} bytes)")
+                        # Fix lambda capture issue by creating a proper closure
+                        def handle_image(data):
+                            self.handle_received_image(data, "server")
+                        self.root.after(0, lambda: handle_image(image_data))
                         
                     elif line.startswith('IMAGE_LIST:'):
                         # Handle server images list (for future use)
@@ -204,9 +349,10 @@ class WindowsClient:
                         error = line[12:]  # Remove 'IMAGE_ERROR:' prefix
                         self.root.after(0, lambda err=error: self.add_message(f"Image Error: {err}", "error"))
                 
-                # Trim buffer if too large
-                if len(buffer) > 16384:
-                    buffer = buffer[-8192:]
+                # Only trim buffer if no complete message is waiting (to avoid breaking large images)
+                if len(buffer) > 3145728 and b'\n' not in buffer:  # 3MB and no complete message
+                    buffer = buffer[-1048576:]  # Keep last 1MB
+                    print(f"Trimmed buffer to {len(buffer)} bytes")
 
             except socket.timeout:
                 continue
@@ -258,29 +404,74 @@ class WindowsClient:
     def handle_received_image(self, image_data, source):
         """Handle received image data"""
         try:
+            print(f"Processing image data from {source}, length: {len(image_data)}")
+            
             # Parse image data (format: filename|base64_data)
+            if '|' not in image_data:
+                print(f"Invalid image data format - no separator found")
+                self.add_message("Invalid image data received - missing separator", "error")
+                return
+                
             parts = image_data.split('|', 1)
             if len(parts) != 2:
+                print(f"Invalid image data format - wrong number of parts: {len(parts)}")
                 self.add_message("Invalid image data received", "error")
                 return
                 
             filename, base64_data = parts
+            print(f"Filename: {filename}, Base64 length: {len(base64_data)}")
+            
+            # Validate base64 data
+            if not base64_data:
+                print("Empty base64 data")
+                self.add_message("Empty image data received", "error")
+                return
             
             # Decode base64 image data
-            image_bytes = base64.b64decode(base64_data)
+            try:
+                image_bytes = base64.b64decode(base64_data)
+                print(f"Decoded image bytes length: {len(image_bytes)}")
+            except Exception as decode_error:
+                print(f"Base64 decode error: {decode_error}")
+                self.add_message(f"Image decode error: {decode_error}", "error")
+                return
             
             # Generate unique filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             saved_filename = f"{timestamp}_{source}_{filename}"
             filepath = os.path.join(self.received_images_dir, saved_filename)
             
+            print(f"Saving image to: {filepath}")
+            
             # Save image to file
             with open(filepath, 'wb') as f:
                 f.write(image_bytes)
             
-            self.add_message(f"📷 Image saved: {saved_filename}", "system")
+            # Verify file was created
+            if os.path.exists(filepath):
+                file_size = os.path.getsize(filepath)
+                print(f"Image successfully saved: {saved_filename} ({file_size} bytes)")
+                self.add_message(f"📷 Image saved: {saved_filename} ({file_size} bytes)", "system")
+                
+                # Automatically run YOLO detection on received image
+                if self.yolo_model:
+                    self.add_message("🔍 Running YOLO object detection...", "system")
+                    processed_path, result_msg = self.detect_objects(filepath)
+                    if processed_path:
+                        self.add_message(f"🎯 YOLO: {result_msg}", "system")
+                        self.add_message(f"💾 Processed image saved", "system")
+                    else:
+                        self.add_message(f"❌ YOLO: {result_msg}", "error")
+                else:
+                    self.add_message("🔍 YOLO model not available for detection", "system")
+            else:
+                print(f"Failed to create file: {filepath}")
+                self.add_message("Failed to save image file", "error")
             
         except Exception as e:
+            print(f"Error in handle_received_image: {e}")
+            import traceback
+            traceback.print_exc()
             self.add_message(f"Error saving image: {e}", "error")
     
     def add_message(self, message, msg_type="vm"):
@@ -385,12 +576,35 @@ class WindowsClient:
         except Exception as e:
             messagebox.showerror("Error", f"Could not open folder: {e}")
     
+    def view_processed_images(self):
+        """Open the processed images folder"""
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(self.processed_images_dir)
+            else:  # Linux/Mac
+                os.system(f'xdg-open "{self.processed_images_dir}"')
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder: {e}")
+    
     def show_pillow_warning(self):
         """Show warning about missing Pillow library"""
         messagebox.showwarning(
             "Pillow Required", 
             "Image functionality requires the Pillow library.\n\n"
             "Install it with: pip install Pillow\n\n"
+            "Then restart the application."
+        )
+    
+    def show_yolo_warning(self):
+        """Show warning about missing YOLO dependencies"""
+        messagebox.showinfo(
+            "YOLOv5 Object Detection", 
+            "YOLOv5 object detection requires:\n\n"
+            "1. Install dependencies:\n"
+            "   pip install torch torchvision numpy\n\n"
+            "2. Download YOLOv5 model:\n"
+            "   wget https://github.com/ultralytics/yolov5/releases/download/v5.0/yolov5s.pt\n\n"
+            "Place yolov5s.pt in the same folder as client.py\n\n"
             "Then restart the application."
         )
     
@@ -424,6 +638,7 @@ class WindowsClient:
         self.select_image_btn.config(state='disabled')
         self.send_image_btn.config(state='disabled')
         self.view_images_btn.config(state='disabled')
+        self.view_processed_btn.config(state='disabled')
     
     def clear_messages(self):
         self.message_area.delete(1.0, tk.END)
