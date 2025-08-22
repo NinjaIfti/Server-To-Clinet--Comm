@@ -75,15 +75,10 @@ class WindowsClient:
             # Run YOLOv5 inference
             results = self.yolo_model(image_path)
             
-            # Debug: Show all detections found (even low confidence ones)
-            all_detections = results.xyxy[0].cpu().numpy()
-            print(f"🔍 YOLOv5: Found {len(all_detections)} total detections")
-            
             # Parse results
             detections = []
-            for *box, conf, cls in all_detections:
-                print(f"   Detection: {self.yolo_model.names[int(cls)]} confidence={conf:.3f}")
-                if conf > 0.1:  # Lowered confidence threshold
+            for *box, conf, cls in results.xyxy[0].cpu().numpy():
+                if conf > 0.3:  # Confidence threshold
                     x1, y1, x2, y2 = map(int, box)
                     label = self.yolo_model.names[int(cls)]
                     detections.append({

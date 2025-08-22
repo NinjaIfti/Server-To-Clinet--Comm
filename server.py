@@ -6,7 +6,10 @@ import os
 import json
 from datetime import datetime
 
+# TCP server for text and image messaging between VM and Windows clients
+
 class VMServer:
+    # Server state and configuration
     def __init__(self, host='0.0.0.0', port=12345):
         self.host = host
         self.port = port
@@ -19,11 +22,12 @@ class VMServer:
         self.setup_directories()
     
     def setup_directories(self):
-        """Create directories for storing images"""
+        # Create folders for incoming and server-side images
         os.makedirs(self.received_images_dir, exist_ok=True)
         os.makedirs(self.server_images_dir, exist_ok=True)
     
     def start_server(self):
+        # Bind, listen and accept client connections
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -41,7 +45,7 @@ class VMServer:
                     with self.clients_lock:
                         self.clients.append(client_socket)
                     
-                    # One thread for pinging/keepalive and one for reading client messages
+                    # One thread for keepalive pings and one for reading client messages
                     threading.Thread(target=self.handle_client_writer, args=(client_socket, client_address), daemon=True).start()
                     threading.Thread(target=self.handle_client_reader, args=(client_socket, client_address), daemon=True).start()
                     
@@ -55,6 +59,7 @@ class VMServer:
             self.cleanup()
     
     def handle_client_writer(self, client_socket, client_address):
+        # Periodically send ping to keep the connection active
         try:
             while self.running:
                 try:
@@ -76,18 +81,19 @@ class VMServer:
             print(f"Client {client_address} disconnected (writer)")
 
     def handle_client_reader(self, client_socket, client_address):
+        # Read incoming data, frame by newline, handle protocol commands
         buffer = b""  # Use bytes buffer for better handling
         client_socket.settimeout(1.0)
         try:
             while self.running:
                 try:
-                    data = client_socket.recv(65536)  # Increased buffer size for images
+                    data = client_socket.recv(65536)  # Larger buffer for image payloads
                     if not data:
                         break
                     
                     buffer += data
                     
-                    # Process complete messages (ending with \n)
+                    # Process complete frames (ending with \n)
                     while b'\n' in buffer:
                         line_bytes, buffer = buffer.split(b'\n', 1)
                         try:
@@ -98,19 +104,23 @@ class VMServer:
                         if not line:
                             continue
                             
+                        # CLIENT:<text> -> broadcast text
                         if line.startswith('CLIENT:'):
                             msg = line[len('CLIENT:'):].strip()
                             if msg:
-                                print(f"From {client_address}: {msg}")
+                                print(f"Received from client {client_address}: {msg}")
                                 self.broadcast_message(f"{client_address[0]} | {msg}")
+                        # IMAGE:<filename>|<base64> -> save and notify
                         elif line.startswith('IMAGE:'):
                             # Handle image data
                             image_data = line[6:]  # Remove 'IMAGE:' prefix
-                            print(f"Received image from {client_address} (message size: {len(line)} bytes)")
+                            print(f"Received image from client {client_address} (message size: {len(line)} bytes)")
                             self.handle_received_image(image_data, client_address)
+                        # REQUEST_LIST -> send available server images
                         elif line.startswith('REQUEST_LIST'):
                             # Send list of available server images
                             self.send_image_list(client_socket)
+                        # REQUEST_IMAGE:<filename> -> send specific image
                         elif line.startswith('REQUEST_IMAGE:'):
                             # Send specific image to client
                             filename = line[14:]  # Remove 'REQUEST_IMAGE:' prefix
@@ -124,7 +134,8 @@ class VMServer:
             # Reader ends; writer cleanup will handle removal/close
             pass
     
-    def broadcast_message(self, message):
+    def broadcast_message(self, message, is_from_server=False):
+        # Send MESSAGE:<payload> to all connected clients
         with self.clients_lock:
             clients_snapshot = list(self.clients)
         if not clients_snapshot:
@@ -136,9 +147,11 @@ class VMServer:
             try:
                 full_message = f"MESSAGE:{message}\n"
                 client.sendall(full_message.encode('utf-8'))
-                # Only print message if it's not image data (to avoid huge base64 strings)
+                # Avoid printing full base64 payloads
                 if not message.startswith('SERVER_IMAGE:'):
-                    print(f"Sent to client: {message}")
+                    if is_from_server:
+                        print(f"Sent to client: {message}")
+                    # For messages from clients, we already printed in handle_client_reader
                 else:
                     # Extract just filename for image messages
                     if '|' in message:
@@ -155,6 +168,7 @@ class VMServer:
                         self.clients.remove(client)
     
     def handle_received_image(self, image_data_str, sender_address):
+        # Parse "filename|base64" frame, decode, save, and broadcast notification
         try:
             # Parse image data (format: filename|base64_data)
             parts = image_data_str.split('|', 1)
@@ -164,7 +178,7 @@ class VMServer:
                 return
                 
             original_filename, base64_data = parts
-            print(f"Processing image: {original_filename} (size: {len(base64_data)} chars)")
+            print(f"Processing image from client: {original_filename} (size: {len(base64_data)} chars)")
             
             # Decode base64 image data
             image_bytes = base64.b64decode(base64_data)
@@ -179,7 +193,7 @@ class VMServer:
             with open(filepath, 'wb') as f:
                 f.write(image_bytes)
             
-            print(f"Image received and saved: {filename}")
+            print(f"Image received from client and saved: {filename}")
             
             # Broadcast image notification to other clients
             self.broadcast_image_notification(original_filename, sender_address)
@@ -188,12 +202,12 @@ class VMServer:
             print(f"Error handling received image: {e}")
     
     def broadcast_image_notification(self, filename, sender_address):
-        """Notify all clients about new image"""
+        # Notify all clients about a new image arrival
         notification = f"IMAGE_RECEIVED:{sender_address[0]}|{filename}"
         self.broadcast_message(notification)
     
     def send_image_list(self, client_socket):
-        """Send list of available server images"""
+        # Send list of server images in JSON
         try:
             images = []
             if os.path.exists(self.server_images_dir):
@@ -209,7 +223,7 @@ class VMServer:
             print(f"Error sending image list: {e}")
     
     def send_image_to_client(self, filename, client_socket):
-        """Send specific image to client"""
+        # Send one image by filename to a single client
         try:
             filepath = os.path.join(self.server_images_dir, filename)
             if not os.path.exists(filepath):
@@ -231,18 +245,18 @@ class VMServer:
             print(f"Error sending image: {e}")
     
     def send_server_image(self, filename):
-        """Broadcast server image to all clients"""
+        # Broadcast an image from server_images/ to all connected clients
         filepath = os.path.join(self.server_images_dir, filename)
         if not os.path.exists(filepath):
             print(f"Image not found: {filename}")
             return
         
         try:
-            print(f"Reading image file: {filepath}")
+            print(f"Reading server image file: {filepath}")
             with open(filepath, 'rb') as f:
                 image_data = f.read()
             
-            print(f"Image file size: {len(image_data)} bytes")
+            print(f"Server image file size: {len(image_data)} bytes")
             
             base64_data = base64.b64encode(image_data).decode('utf-8')
             print(f"Base64 encoded size: {len(base64_data)} characters")
@@ -262,10 +276,10 @@ class VMServer:
             sent_count = 0
             for client in clients_snapshot:
                 try:
-                    print(f"Sending image to client: {len(message)} bytes total")
+                    print(f"Sending server image to client: {len(message)} bytes total")
                     client.sendall(message.encode('utf-8'))
                     sent_count += 1
-                    print(f"Successfully sent to client {sent_count}")
+                    print(f"Successfully sent server image to client {sent_count}")
                 except Exception as e:
                     print(f"Failed to send image to client: {e}")
                     disconnected_clients.append(client)
@@ -284,7 +298,7 @@ class VMServer:
             traceback.print_exc()
     
     def list_server_images(self):
-        """List available server images"""
+        # Print the images available under server_images/
         if os.path.exists(self.server_images_dir):
             images = [f for f in os.listdir(self.server_images_dir) 
                      if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
@@ -301,6 +315,7 @@ class VMServer:
             return []
     
     def input_handler(self):
+        # Simple console for server commands and text broadcast
         print("\nVM Server Commands:")
         print("- Type messages to send to clients")
         print("- 'list' - Show available server images")
@@ -340,13 +355,14 @@ class VMServer:
                         print("Please specify a filename")
                         
                 elif user_input:
-                    self.broadcast_message(user_input)
+                    self.broadcast_message(user_input, is_from_server=True)
                     
             except KeyboardInterrupt:
                 self.running = False
                 break
     
     def cleanup(self):
+        # Close all sockets and clear state
         print("\nShutting down server...")
         self.running = False
         
@@ -376,6 +392,7 @@ class VMServer:
         print("Server shut down complete")
 
 def main():
+    # Start server in background thread and run console input loop
     server = VMServer()
     
     server_thread = threading.Thread(target=server.start_server)
