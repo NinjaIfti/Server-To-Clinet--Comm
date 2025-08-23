@@ -314,6 +314,54 @@ class VMServer:
             print("Server images directory not found")
             return []
     
+    def show_network_info(self):
+        # Show network information to help with connection
+        print("\nNetwork Information:")
+        print("=" * 50)
+        
+        try:
+            import socket
+            hostname = socket.gethostname()
+            print(f"Hostname: {hostname}")
+            
+            # Get local IP addresses
+            try:
+                import subprocess
+                if os.name == 'nt':  # Windows
+                    result = subprocess.run(['ipconfig'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if 'IPv4 Address' in line and '192.168' in line:
+                                print(f"Home Network IP: {line.strip()}")
+                            elif 'IPv4 Address' in line and '10.' in line:
+                                print(f"School Network IP: {line.strip()}")
+                            elif 'IPv4 Address' in line and '172.' in line:
+                                print(f"Mobile Hotspot/Private Network IP: {line.strip()}")
+                else:  # Linux/Mac
+                    result = subprocess.run(['ip', 'addr'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if 'inet ' in line and '192.168' in line:
+                                print(f"Home Network IP: {line.strip()}")
+                            elif 'inet ' in line and '10.' in line:
+                                print(f"School Network IP: {line.strip()}")
+                            elif 'inet ' in line and '172.' in line:
+                                print(f"Mobile Hotspot/Private Network IP: {line.strip()}")
+            except Exception as e:
+                print(f"Could not get network info: {e}")
+            
+            print(f"\nServer listening on: {self.host}:{self.port}")
+            print("\nConnection Tips:")
+            print("• For mobile hotspots: Check if 'Client Isolation' is disabled")
+            print("• Try different ports if 12345 is blocked (8080, 8888, 3000)")
+            print("• Ensure both devices are connected to the same hotspot")
+            print("=" * 50)
+            
+        except Exception as e:
+            print(f"Error getting network info: {e}")
+    
     def input_handler(self):
         # Simple console for server commands and text broadcast
         print("\nVM Server Commands:")
@@ -321,6 +369,7 @@ class VMServer:
         print("- 'list' - Show available server images")
         print("- 'send <filename>' - Send image to all clients")
         print("- 'clients' - Show connected clients")
+        print("- 'network' - Show network information")
         print("- 'quit' - Stop server\n")
         
         while self.running:
@@ -346,6 +395,9 @@ class VMServer:
                                     print(f"{i}. Unknown address")
                         else:
                             print("No clients connected")
+                            
+                elif user_input.lower() == 'network':
+                    self.show_network_info()
                             
                 elif user_input.lower().startswith('send '):
                     filename = user_input[5:].strip()

@@ -39,6 +39,45 @@ class WindowsClient:
         os.makedirs(self.received_images_dir, exist_ok=True)
         os.makedirs(self.processed_images_dir, exist_ok=True)
     
+    def detect_best_ip(self):
+        """Detect the best default IP address to use"""
+        try:
+            import socket
+            import subprocess
+            
+            # Try to get local IP addresses
+            try:
+                if os.name == 'nt':  # Windows
+                    result = subprocess.run(['ipconfig'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if 'IPv4 Address' in line and '192.168.56' in line:
+                                return "192.168.56.1"  # VM network
+                            elif 'IPv4 Address' in line and '172.' in line:
+                                return "172.20.10.7"  # Mobile hotspot - use VM IP
+                            elif 'IPv4 Address' in line and '192.168.1' in line:
+                                return "192.168.56.1"  # Home network - use VM IP
+                else:  # Linux/Mac
+                    result = subprocess.run(['ip', 'addr'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if 'inet ' in line and '192.168.56' in line:
+                                return "192.168.56.1"
+                            elif 'inet ' in line and '172.' in line:
+                                return "172.20.10.7"
+                            elif 'inet ' in line and '192.168.1' in line:
+                                return "192.168.56.1"
+            except:
+                pass
+                
+            # Fallback to VM IP if we can't detect
+            return "172.20.10.7"
+            
+        except:
+            return "172.20.10.7"
+    
     def setup_yolo(self):
         """Initialize YOLOv5 model"""
         if not YOLO_AVAILABLE:
@@ -162,7 +201,10 @@ class WindowsClient:
         tk.Label(conn_frame, text="VM IP Address:").pack(side='left')
         self.ip_entry = tk.Entry(conn_frame, width=20)
         self.ip_entry.pack(side='left', padx=5)
-        self.ip_entry.insert(0, "192.168.0.106")
+        
+        # Try to detect the best default IP
+        default_ip = self.detect_best_ip()
+        self.ip_entry.insert(0, default_ip)
         
         tk.Label(conn_frame, text="Port:").pack(side='left', padx=(10,0))
         self.port_entry = tk.Entry(conn_frame, width=8)
@@ -171,6 +213,16 @@ class WindowsClient:
         
         self.connect_btn = tk.Button(conn_frame, text="Connect", command=self.connect_to_server)
         self.connect_btn.pack(side='left', padx=10)
+        
+        # Add connection help button
+        self.help_btn = tk.Button(conn_frame, text="?", command=self.show_connection_help, 
+                                 font=('Arial', 8, 'bold'), width=2)
+        self.help_btn.pack(side='left', padx=5)
+        
+        # Add network info button
+        self.network_btn = tk.Button(conn_frame, text="🌐", command=self.show_network_info, 
+                                   font=('Arial', 8), width=2)
+        self.network_btn.pack(side='left', padx=2)
         
         self.status_label = tk.Label(conn_frame, text="Disconnected", fg="red")
         self.status_label.pack(side='right')
@@ -285,7 +337,17 @@ class WindowsClient:
             receive_thread.start()
             
         except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
+            error_msg = str(e)
+            if "Connection refused" in error_msg:
+                detailed_error = f"Connection refused to {vm_ip}:{port}\n\nPossible causes:\n• Server not running\n• Wrong IP address\n• Wrong port\n• Firewall blocking connection"
+            elif "No route to host" in error_msg:
+                detailed_error = f"No route to host {vm_ip}\n\nPossible causes:\n• Wrong IP address\n• Server not on this network\n• Network configuration issue"
+            elif "timed out" in error_msg:
+                detailed_error = f"Connection timed out to {vm_ip}:{port}\n\nPossible causes:\n• Server not responding\n• Network congestion\n• Firewall blocking connection"
+            else:
+                detailed_error = f"Connection failed: {error_msg}\n\nTry:\n• Check IP address\n• Verify server is running\n• Check network connection"
+            
+            messagebox.showerror("Connection Error", detailed_error)
             self.cleanup_connection()
     
     def receive_messages(self):
@@ -589,6 +651,82 @@ class WindowsClient:
             "Install it with: pip install Pillow\n\n"
             "Then restart the application."
         )
+    
+    def show_connection_help(self):
+        """Show connection help and troubleshooting tips"""
+        help_text = """Connection Help:
+
+Common IP Addresses:
+• localhost or 127.0.0.1 - Connect to server on same computer
+• 192.168.x.x - Home/private network (e.g., 192.168.1.100)
+• 10.x.x.x - School/enterprise network (e.g., 10.0.0.100)
+• 172.16.x.x - Another private network range
+
+Troubleshooting:
+1. Make sure the server is running on the VM
+2. Check if the port (12345) is correct
+3. On school networks, try different IP ranges
+4. Ask your network admin for the correct IP
+5. Try using 'localhost' if server is on same machine
+
+To find the server IP on the VM:
+• Run 'ip addr' or 'ifconfig' on the VM
+• Look for the IP address in your network range"""
+        
+        messagebox.showinfo("Connection Help", help_text)
+    
+    def show_network_info(self):
+        """Show current network information"""
+        try:
+            import socket
+            import subprocess
+            
+            info_text = "Network Information:\n\n"
+            
+            # Get hostname
+            hostname = socket.gethostname()
+            info_text += f"Hostname: {hostname}\n\n"
+            
+            # Get local IP addresses
+            try:
+                if os.name == 'nt':  # Windows
+                    result = subprocess.run(['ipconfig'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        info_text += "Network Interfaces:\n"
+                        for line in lines:
+                            if 'IPv4 Address' in line and '192.168.56' in line:
+                                info_text += f"• VM Network: {line.strip()}\n"
+                            elif 'IPv4 Address' in line and '172.' in line:
+                                info_text += f"• Mobile Hotspot: {line.strip()}\n"
+                            elif 'IPv4 Address' in line and '192.168.1' in line:
+                                info_text += f"• Home Network: {line.strip()}\n"
+                            elif 'IPv4 Address' in line and '10.' in line:
+                                info_text += f"• Other Network: {line.strip()}\n"
+                else:  # Linux/Mac
+                    result = subprocess.run(['ip', 'addr'], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        lines = result.stdout.split('\n')
+                        info_text += "Network Interfaces:\n"
+                        for line in lines:
+                            if 'inet ' in line and '192.168.56' in line:
+                                info_text += f"• VM Network: {line.strip()}\n"
+                            elif 'inet ' in line and '172.' in line:
+                                info_text += f"• Mobile Hotspot: {line.strip()}\n"
+                            elif 'inet ' in line and '192.168.1' in line:
+                                info_text += f"• Home Network: {line.strip()}\n"
+                            elif 'inet ' in line and '10.' in line:
+                                info_text += f"• Other Network: {line.strip()}\n"
+            except Exception as e:
+                info_text += f"Could not get network info: {e}\n"
+            
+            info_text += f"\nRecommended Server IP: 172.20.10.7 (Your VM)"
+            info_text += "\n\nNote: For mobile hotspot, you may need to disable 'Client Isolation'"
+            
+            messagebox.showinfo("Network Information", info_text)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not get network information: {e}")
     
     def show_yolo_warning(self):
         """Show warning about missing YOLO dependencies"""

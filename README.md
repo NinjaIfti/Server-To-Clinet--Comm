@@ -30,9 +30,6 @@ This project provides a unified real-time messaging and image transfer system th
 - `test_client.py` - Simple test client for basic connection testing
 - `requirements.txt` - Python dependencies (includes Pillow for images)
 
-### Legacy Separate System (Optional)
-- `image_server.py` - Standalone image server (for reference)
-- `image_client.py` - Standalone image client (for reference)
 
 ## Requirements
 
